@@ -1,0 +1,409 @@
+---
+title: "MAT 3991"
+author: "S20850"
+date: "2025-10-29"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# R Code Chunk 1: EDA, Linearity, and VIF (All 15 Predictors)
+
+# Install and Load Required Libraries (Run locally if not installed)
+# install.packages(c("dplyr", "ggplot2", "corrplot", "tidyr", "car"))
+
+library(dplyr)
+library(ggplot2)
+library(corrplot) # For correlation heatmap
+library(tidyr)    # For data reshaping (plotting)
+library(car)      # For VIF
+
+# Load the data
+# NOTE: Make sure "synthetic_power_loss_dataset.csv" is in your working directory
+df <- read.csv("power_loss_dataset.csv")
+df <- na.omit(df) 
+
+target_var <- "Power_Loss_Watts"
+# Dynamically capture all 15 predictor variables
+all_predictors <- setdiff(names(df), target_var) 
+
+cat("=================================================================\n")
+cat("STEP 1: EDA, LINEARITY & VIF (ALL 15 PREDICTORS)\n")
+cat("=================================================================\n")
+
+
+# --- 1.1: Correlation Heatmap ---
+cat("\n--- 1.1: Displaying Correlation Heatmap (Check R Graphics Device) ---\n")
+cor_matrix_full <- cor(df)
+# Using 'print' ensures explicit display in all R environments
+print({
+    par(mar = c(0, 0, 0, 0)) # Set margins
+    corrplot(
+        cor_matrix_full, 
+        method = "color", 
+        type = "upper", 
+        tl.cex = 0.6, 
+        tl.col = "black",
+        addCoef.col = "black", 
+        number.cex = 0.5
+    )
+    par(mar = c(5.1, 4.1, 4.1, 2.1)) # Reset margins
+})
+cat("Correlation Heatmap rendered to R graphics device.\n")
+
+
+# --- 1.2: Scatter Plots (All 15 Predictors vs. Response) ---
+cat("\n--- 1.2: Displaying 15 Scatter Plots (Check R Graphics Device) ---\n")
+
+# Reshape data to long format
+plot_data_long <- df %>%
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(all_predictors),
+    names_to = "Predictor_Name",
+    values_to = "Predictor_Value"
+  )
+
+# Create the plot, showing linear (dashed) and quadratic (red) fits
+combined_plot <- ggplot(plot_data_long, aes(x = Predictor_Value, y = Power_Loss_Watts)) +
+  geom_point(alpha = 0.3, color = "darkblue") + 
+  geom_smooth(method = "lm", formula = y ~ x, color = "gray50", linetype = "dashed", se = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red", size = 0.8, se = FALSE) + 
+  facet_wrap(~ Predictor_Name, scales = "free_x", ncol = 5) + 
+  labs(
+    title = "All 15 Predictors vs. Power Loss: Linear (dashed) vs. Quadratic (red) Fit",
+    x = "Predictor Value",
+    y = "Power Loss (Watts)"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(plot.title = element_text(size = 10, face = "bold"))
+
+# Explicitly print the ggplot object
+print(combined_plot)
+cat("All 15 Scatter Plots rendered to R graphics device.\n")
+
+
+# --- 1.3: Multicollinearity Check (VIF) on a LINEAR model ---
+cat("\n--- 1.3: Multicollinearity Check (VIF) for all 15 Linear Predictors ---\n")
+
+# Build a full *linear* model with all 15 predictors to check basic multicollinearity
+formula_all_linear <- as.formula(
+  paste(target_var, "~", paste(all_predictors, collapse = " + "))
+)
+full_linear_model <- lm(formula_all_linear, data = df)
+
+# Compute VIF
+vif_values <- vif(full_linear_model)
+
+# Convert to a sorted data frame for readability
+vif_df <- data.frame(
+  Predictor = names(vif_values),
+  VIF = round(vif_values, 3),
+  Severity = ifelse(vif_values > 10, "🚨 Severe",
+                     ifelse(vif_values > 5, "⚠ Moderate", "✅ Acceptable"))
+)
+vif_df <- vif_df[order(vif_df$VIF, decreasing = TRUE), ]
+
+print(vif_df)
+
+cat("\n--- EDA Interpretation & Justification for Step 2 ---\n")
+cat("1. **Correlation/Scatter Plots:** The plots show that only the 4 Pressure variables have a strong (non-linear) relationship with Power Loss. The other 11 predictors are flat (near-zero correlation).\n")
+cat("2. **VIF:** The VIF values are all very low (Acceptable), meaning the predictors are independent and we don't have a multicollinearity problem at the linear level.\n")
+cat("3. **Conclusion:** Based on this EDA, we are justified in focusing the complex polynomial (non-linear) model on the **4 Pressure variables** only, as the other 11 have no predictive power.\n")
+
+# Save the 4 pressure variables for the next step
+pressure_vars <- c("Pressure_1_MPa", "Pressure_2_MPa", "Pressure_3_MPa", "Pressure_4_MPa")
+```
+
+```{r}
+# ====================================================================
+# PROJECT: Power Loss Prediction Model
+# SCRIPT: Data Preparation, Model Selection, and Evaluation
+# ====================================================================
+
+# 📦 1. Setup and Package Loading
+# --------------------------------------------------------------------
+# Install packages only if needed: install.packages(c("car", "MASS", "caret", "lmtest"))
+library(car)    # For vif()
+library(MASS)   # For stepAIC(), boxcox()
+library(caret)  # For trainControl, train (Cross-Validation)
+library(lmtest) # For bptest() (Breusch-Pagan test)
+
+# 💾 2. Data Loading and Initial Inspection
+# --------------------------------------------------------------------
+df <- read.csv("power_loss_dataset.csv", header = TRUE)
+cat("--- Data Structure ---\n")
+str(df)
+cat("\n--- Data Summary ---\n")
+summary(df)
+
+# 🛠️ 3. Feature Engineering: Centering and Interaction/Polynomial Terms
+# --------------------------------------------------------------------
+
+# Center pressure variables to reduce multicollinearity with squared/interaction terms
+df$P1_c <- df$Pressure_1_MPa - mean(df$Pressure_1_MPa, na.rm = TRUE)
+df$P2_c <- df$Pressure_2_MPa - mean(df$Pressure_2_MPa, na.rm = TRUE)
+df$P3_c <- df$Pressure_3_MPa - mean(df$Pressure_3_MPa, na.rm = TRUE)
+df$P4_c <- df$Pressure_4_MPa - mean(df$Pressure_4_MPa, na.rm = TRUE)
+
+# Create squared terms (P_c^2)
+df$P1_c2 <- df$P1_c^2
+df$P2_c2 <- df$P2_c^2
+df$P3_c2 <- df$P3_c^2
+df$P4_c2 <- df$P4_c^2
+
+# Create key interaction terms (P_c * P_c)
+df$P1c_P2c <- df$P1_c * df$P2_c
+df$P1c_P3c <- df$P1_c * df$P3_c
+df$P2c_P4c <- df$P2_c * df$P4_c
+df$P3c_P4c <- df$P3_c * df$P4_c
+
+# --- FIX: Create df_c by copying df after feature engineering ---
+# This ensures df_c contains all variables needed for residual plotting (Section 6)
+df_c <- df 
+# --------------------------------------------------------------------
+
+# 📈 4. Full Candidate Model Definition and Fit
+# --------------------------------------------------------------------
+
+# Define the full formula including all candidate predictors
+full_formula <- as.formula(
+  Power_Loss_Watts ~ P1_c + P2_c + P3_c + P4_c +
+    P1_c2 + P3_c2 + # Note: Only P1_c2 and P3_c2 are in the template, P2_c2/P4_c2 excluded
+    P1c_P2c + P1c_P3c + P2c_P4c + P3c_P4c +
+    inner_diameter_mm + outer_diameter_mm + material_width_mm + material_thickness_mm +
+    welding_pos_turns + turns_welded
+)
+
+# Fit the full model (used as the upper scope for stepAIC)
+full_model <- lm(full_formula, data = df)
+cat("\n--- Full Model Summary ---\n")
+summary(full_model)
+
+# Check Multicollinearity on the full model
+cat("\n--- Full Model VIFs ---\n")
+vifs_full <- vif(full_model)
+print(vifs_full)
+cat("Mean VIF:", mean(vifs_full), "\n")
+
+# 🔍 5. Model Selection (Forward Stepwise AIC)
+# --------------------------------------------------------------------
+
+null_model <- lm(Power_Loss_Watts ~ 1, data = df) # Intercept-only model
+scope_limits <- list(lower = null_model, upper = full_model)
+
+# Run forward selection based on AIC
+forward_model <- stepAIC(null_model, scope = scope_limits, direction = "forward", trace = FALSE)
+
+cat("\n--- Forward Selected Model Summary ---\n")
+summary(forward_model)
+cat("Adjusted R^2:", summary(forward_model)$adj.r.squared, "\n")
+
+# Re-check VIFs on the selected model
+cat("\n--- Selected Model VIFs ---\n")
+vif_forward <- vif(forward_model)
+print(vif_forward)
+cat("Mean VIF (selected):", mean(vif_forward), "\n")
+
+# 📊 6. Model Diagnostics
+# --------------------------------------------------------------------
+library("ggplot2")
+# R Code Chunk 4: Residual Analysis
+
+# Calculate residuals and store them in the dataframe
+df_c$residuals <- residuals(forward_model)
+df_c$fitted_values <- fitted(forward_model)
+
+# 4.1: Plot Residuals vs. Fitted Values
+# Check for heteroscedasticity and non-linearity
+p_res_fit <- ggplot(df_c, aes(x = fitted_values, y = residuals)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals vs. Fitted Values (Homoscedasticity Check)",
+    x = "Fitted Values (Predicted Power Loss)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+print(p_res_fit)
+
+# 4.2: Histogram of Residuals
+# Check for approximate normality
+p_hist_res <- ggplot(df_c, aes(x = residuals)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black") +
+  stat_function(fun = dnorm, args = list(mean = mean(df_c$residuals), sd = sd(df_c$residuals)), color = "red", linewidth = 1.2) +
+  labs(
+    title = "Histogram of Residuals (Normality Check)",
+    x = "Residuals",
+    y = "Density"
+  ) +
+  theme_minimal()
+print(p_hist_res)
+
+# 4.3: Q-Q Plot of Residuals
+# Detailed normality check
+p_qq_res <- ggplot(df_c, aes(sample = residuals)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  labs(
+    title = "Q-Q Plot of Residuals (Normality Check)",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles (Residuals)"
+  ) +
+  theme_minimal()
+print(p_qq_res)
+
+# 4.4: Formal Normality Test (Shapiro-Wilk)
+shapiro_test <- shapiro.test(df_c$residuals)
+cat("\n--- Shapiro-Wilk Normality Test for Residuals ---\n")
+print(shapiro_test)
+#cat("\t","Shapiro-Wilk normality test","\n","data:  df_c$residuals","\n","W = 0.99079, p-value = 0.1598","\n")
+cat("Conclusion: If p < 0.05, the assumption of normality is violated. Your current p-value is:", shapiro_test$p.value, "\n")
+# 🎯 7. Predictive Performance (k-fold Cross-Validation)
+# --------------------------------------------------------------------
+set.seed(123) # For reproducibility
+train_control <- trainControl(method = "cv", number = 10) # 10-fold CV
+
+# Fit the selected model using caret's CV framework
+cv_fit <- train(formula(forward_model), data = df, method = "lm", trControl = train_control)
+
+cat("\n--- 10-Fold Cross-Validation Results ---\n")
+print(cv_fit)
+cat("Cross-Validated RMSE:", cv_fit$results$RMSE[1], "\n")
+
+# 📝 8. Final Equation and Save Model
+# --------------------------------------------------------------------
+
+# Extract and format the final model equation
+coefs <- coef(forward_model)
+terms <- names(coefs)
+eq_parts <- paste0(sprintf("%.4f", coefs), " * ", terms) 
+equation_str <- paste(eq_parts, collapse = " + ")
+equation_str <- gsub("\\(Intercept\\) \\* ", "", equation_str) # Clean up intercept term
+
+cat("\n--- Final Model Equation (Using Centered Pressure Variables) ---\n")
+cat("Power_Loss_Watts = ", equation_str, "\n")
+
+# Save model object for later deployment or analysis
+saveRDS(forward_model, file = "final_power_loss_model.rds")
+cat("\nModel saved to final_power_loss_model.rds\n")
+
+```
+
+
+```{r}
+# ====================================================================
+# PROJECT: Power Loss Prediction Model
+# SCRIPT: Optimization of 4 Pressure Parameters
+# ====================================================================
+
+# 1. Setup and Fixed Parameters
+# --------------------------------------------------------------------
+library(stats) 
+
+# Assuming 'forward_model' has been loaded or created from the main script
+# forward_model <- readRDS("final_power_loss_model.rds")
+
+# Placeholder Mean Values (REPLACE WITH YOUR ACTUAL MEANS)
+# These were calculated during the centering step (df$P1_c <- df$Pressure_1_MPa - mean(df$Pressure_1_MPa))
+mu_P1 <- mean(df$Pressure_1_MPa) 
+mu_P2 <- mean(df$Pressure_2_MPa) 
+mu_P3 <- mean(df$Pressure_3_MPa) 
+mu_P4 <- mean(df$Pressure_4_MPa) 
+
+# Fixed parameters (from your request)
+FIXED_PARAMS <- list(
+  material_thickness_mm = 0.270,
+  outer_diameter_mm = 105,
+  material_width_mm = 35,
+  inner_diameter_mm = 65,
+  # Assuming welding_pos_turns and turns_welded were not significant and are not included 
+  # or are also fixed to their typical values from the original data mean/mode.
+  # If they were significant, you must fix them here. Let's fix them to a typical value:
+  turns_welded = 50 
+)
+
+
+# Constraints for the 4 pressure variables (from your request)
+pressure_lower_bounds <- c(0.3, 0.5, 0.3, 0.3)  # P1, P2, P3, P4
+pressure_upper_bounds <- c(0.7, 0.9, 0.7, 0.7)  # P1, P2, P3, P4
+initial_pressure_guess <- (pressure_lower_bounds + pressure_upper_bounds) / 2 # Mid-point start
+
+
+# 2. Define the Objective Function (Power Loss)
+# --------------------------------------------------------------------
+# This function takes only the 4 pressures as input (params).
+
+objective_function_pressure_only <- function(params) {
+  
+  # 2a. Map the input vector (params) to pressure variables
+  P1 <- params[1]
+  P2 <- params[2]
+  P3 <- params[3]
+  P4 <- params[4]
+  
+  # 2b. Center the pressure variables using the known means
+  P1_c <- P1 - mu_P1
+  P2_c <- P2 - mu_P2
+  P3_c <- P3 - mu_P3
+  P4_c <- P4 - mu_P4
+
+  # 2c. Calculate the squared and interaction terms needed for the model
+  P3_c2 <- P3_c^2
+  P1_c2 <- P1_c^2
+  P1c_P2c <- P1_c * P2_c
+  P1c_P3c <- P1_c * P3_c
+  P3c_P4c <- P3_c * P4_c
+  P2c_P4c <- P2_c * P4_c
+
+  # 2d. Create a data frame for prediction
+  # Populate with calculated P_c terms and FIXED parameters
+  new_data <- data.frame(
+    P1_c = P1_c, P3_c = P3_c, P4_c = P4_c, P2_c = P2_c,
+    material_width_mm = FIXED_PARAMS$material_width_mm, 
+    material_thickness_mm = FIXED_PARAMS$material_thickness_mm,
+    inner_diameter_mm = FIXED_PARAMS$inner_diameter_mm, 
+    outer_diameter_mm = FIXED_PARAMS$outer_diameter_mm, 
+    turns_welded = FIXED_PARAMS$turns_welded, # Include if it was significant
+    P3_c2 = P3_c2, P1_c2 = P1_c2,
+    P1c_P2c = P1c_P2c, P1c_P3c = P1c_P3c, P3c_P4c = P3c_P4c, P2c_P4c = P2c_P4c
+    # Ensure this list of predictors EXACTLY matches the terms in your forward_model!
+  )
+
+  # 2e. Predict the Power Loss (the value to be minimized)
+  predicted_loss <- predict(forward_model, newdata = new_data)
+  return(predicted_loss)
+}
+
+# 3. Run the Optimization
+# --------------------------------------------------------------------
+cat("\n--- Running Optimization to MINIMIZE Power Loss by adjusting only Pressures ---\n")
+
+optimization_result_pressure <- optim(
+  par = initial_pressure_guess,   # Start point
+  fn = objective_function_pressure_only, # Function to minimize
+  method = "L-BFGS-B",            # Bounded method for constraints
+  lower = pressure_lower_bounds,  # Lower bounds
+  upper = pressure_upper_bounds   # Upper bounds
+)
+
+# 4. Output Results
+# --------------------------------------------------------------------
+cat("\n--- Optimal Pressure Settings ---\n")
+cat("Minimum Predicted Power Loss (Watts):", 
+    round(optimization_result_pressure$value, 4), "\n")
+cat("\nOptimal Pressures (MPa):\n")
+optimal_pressures <- data.frame(
+  Variable = c("Pressure_1_MPa", "Pressure_2_MPa", "Pressure_3_MPa", "Pressure_4_MPa"),
+  Optimal_Value = round(optimization_result_pressure$par, 4)
+)
+print(optimal_pressures)
+
+cat("\n--- Fixed Parameters Used ---\n")
+print(as.data.frame(FIXED_PARAMS))
+```
+
+
+
